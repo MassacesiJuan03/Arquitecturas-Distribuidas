@@ -1,0 +1,10 @@
+# Archivo de hosts para el cluster MPI
+# Una IP por línea
+# Las líneas que comienzan con # son comentarios
+
+10.65.5.113
+10.65.5.115
+
+# Agrega más IPs aquí:
+# 10.65.5.120
+# 10.65.5.121
