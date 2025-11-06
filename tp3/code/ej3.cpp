@@ -1,173 +1,154 @@
-#include <iostream>
-#include <fstream>
-#include <vector>
-#include <string>
-#include <chrono>
-#include <mpi.h>      // Biblioteca MPI para programación paralela distribuida
-
+#include <mpi.h>
+#include <bits/stdc++.h>
+#include <sys/time.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 using namespace std;
-using namespace std::chrono;
 
-// Calcula un elemento (row, col) del producto de matrices A * B
-float prod_matrix(const vector<vector<float>>& A, const vector<vector<float>>& B, int row, int col) {
-    float sum = 0.0f;
-    int n = A[0].size();
-    for (int k = 0; k < n; ++k) { 
-        sum += A[row][k] * B[k][col];
-    }
-    return sum;
-}
-
-// Función para multiplicar un bloque de filas de A con toda la matriz B
-// start_row: fila inicial del bloque
-// end_row: fila final del bloque (exclusivo)
-// Retorna el bloque resultante de la multiplicación
-vector<vector<float>> multiply_rows(const vector<vector<float>>& A, 
-                                     const vector<vector<float>>& B, 
-                                     int start_row, int end_row, int N) {
-    vector<vector<float>> result(end_row - start_row, vector<float>(N));
+static string detectar_ip_local() {
+    int descriptor_socket = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (descriptor_socket < 0) return "0.0.0.0";
     
-    for (int i = start_row; i < end_row; ++i) {
-        for (int j = 0; j < N; ++j) {
-            result[i - start_row][j] = prod_matrix(A, B, i, j);
-        }
+    sockaddr_in direccion_destino{};
+    direccion_destino.sin_family = AF_INET;
+    direccion_destino.sin_port   = htons(53);
+    ::inet_pton(AF_INET, "1.1.1.1", &direccion_destino.sin_addr);
+    
+    if (::connect(descriptor_socket, (sockaddr*)&direccion_destino, sizeof(direccion_destino)) < 0) { 
+        ::close(descriptor_socket); 
+        return "0.0.0.0"; 
     }
     
-    return result;
+    sockaddr_in addr_local{}; 
+    socklen_t tam_addr = sizeof(addr_local);
+    if (::getsockname(descriptor_socket, (sockaddr*)&addr_local, &tam_addr) < 0) { 
+        ::close(descriptor_socket); 
+        return "0.0.0.0"; 
+    }
+    
+    ::close(descriptor_socket);
+    char buffer_ip[INET_ADDRSTRLEN] = {0};
+    const char* cadena_ip = ::inet_ntop(AF_INET, &addr_local.sin_addr, buffer_ip, sizeof(buffer_ip));
+    return cadena_ip ? string(cadena_ip) : "0.0.0.0";
 }
 
-int main(int argc, char** argv){
-    // Inicialización de MPI
+int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
-    
-    // Obtener el número total de procesos
-    int world_size;
-    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
-    
-    // Obtener el rank del proceso actual
-    int rank;
+
+    int rank = 0, size = 1;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    
-    int N; // Tamaño de las matrices
-    vector<vector<float>> A, B, C;
-    double tiempo_inicio, tiempo_fin;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    // Solo el proceso 0 lee el tamaño e inicializa las matrices
-    if (rank == 0) {
-        cout << "Ingrese el tamaño de las matrices (N x N): ";
-        cin >> N;
-    }
-
-    // Broadcast: enviar N a todos los procesos
-    MPI_Bcast(&N, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-    // Todos los procesos inicializan las matrices A y B
-    A.resize(N, vector<float>(N));
-    B.resize(N, vector<float>(N));
+    long long dimension_vectores = 100000000LL;
     
     if (rank == 0) {
-        // Solo el proceso 0 inicializa los valores
-        for (int i = 0; i < N; ++i)
-            for (int j = 0; j < N; ++j) {
-                A[i][j] = 0.1f;
-                B[i][j] = 0.2f;
-            }
+        cout << "=== Producto Escalar de Vectores con MPI ===" << endl;
+        cout << "Ingrese el tamaño de los vectores (Enter para usar " << dimension_vectores << "): ";
+        long long entrada_dimension;
+        if (cin >> entrada_dimension && entrada_dimension > 0) {
+            dimension_vectores = entrada_dimension;
+        }
+        cin.clear();
+        cin.ignore(numeric_limits<streamsize>::max(), '\n');
     }
 
-    // Broadcast: el proceso 0 envía las matrices A y B a todos los procesos
-    // Cada proceso necesita ambas matrices completas para su cálculo
-    for (int i = 0; i < N; ++i) {
-        MPI_Bcast(&A[i][0], N, MPI_FLOAT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(&B[i][0], N, MPI_FLOAT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&dimension_vectores, 1, MPI_LONG_LONG, 0, MPI_COMM_WORLD);
+
+    string direccion_ip_proceso = detectar_ip_local();
+    char nombre_procesador[MPI_MAX_PROCESSOR_NAME]; 
+    int longitud_nombre = 0;
+    MPI_Get_processor_name(nombre_procesador, &longitud_nombre);
+
+    long long elementos_base = dimension_vectores / size;
+    long long elementos_sobrantes  = dimension_vectores % size;
+    long long indice_comienzo = rank * elementos_base + min<long long>(rank, elementos_sobrantes);
+    long long cantidad_elementos  = elementos_base + (rank < elementos_sobrantes ? 1 : 0);
+    long long indice_termino   = indice_comienzo + cantidad_elementos;
+
+    vector<double> vector_A_local(cantidad_elementos);
+    vector<double> vector_B_local(cantidad_elementos);
+    
+    for (long long idx = 0; idx < cantidad_elementos; ++idx) {
+        long long posicion_global = indice_comienzo + idx;
+        vector_A_local[idx] = (double)(posicion_global + 1);
+        vector_B_local[idx] = (double)(dimension_vectores - posicion_global);
     }
 
-    // Sincronizar antes de medir tiempo
+    if (rank == 0) {
+        cout << "Tamaño de vectores: " << dimension_vectores << endl;
+        cout << "Número de procesos: " << size << endl;
+        cout << "Elementos por proceso (aproximado): " << elementos_base << endl;
+    }
+
     MPI_Barrier(MPI_COMM_WORLD);
+    timeval tiempo_inicio{}, tiempo_final{};
+    if (rank == 0) gettimeofday(&tiempo_inicio, nullptr);
+
+    double resultado_parcial = 0.0;
+    for (long long idx = 0; idx < cantidad_elementos; ++idx) {
+        resultado_parcial += vector_A_local[idx] * vector_B_local[idx];
+    }
+
+    double resultado_total = 0.0;
+    MPI_Reduce(&resultado_parcial, &resultado_total, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+
+    const int TAM_BUFFER_IP = 64;
+    char buffer_mi_ip[TAM_BUFFER_IP]; 
+    memset(buffer_mi_ip, 0, sizeof(buffer_mi_ip));
+    snprintf(buffer_mi_ip, TAM_BUFFER_IP, "%s", direccion_ip_proceso.c_str());
     
+    vector<char> ips_todos_procesos; 
+    ips_todos_procesos.resize(size * TAM_BUFFER_IP, 0);
+    MPI_Gather(buffer_mi_ip, TAM_BUFFER_IP, MPI_CHAR, ips_todos_procesos.data(), TAM_BUFFER_IP, MPI_CHAR, 0, MPI_COMM_WORLD);
+
+    vector<long long> elementos_por_proceso(size);
+    MPI_Gather(&cantidad_elementos, 1, MPI_LONG_LONG, elementos_por_proceso.data(), 1, MPI_LONG_LONG, 0, MPI_COMM_WORLD);
+
+    vector<double> productos_parciales(size);
+    MPI_Gather(&resultado_parcial, 1, MPI_DOUBLE, productos_parciales.data(), 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+
     if (rank == 0) {
-        tiempo_inicio = MPI_Wtime();
-    }
+        gettimeofday(&tiempo_final, nullptr);
+        double tiempo_ejecucion = (tiempo_final.tv_sec - tiempo_inicio.tv_sec) + 
+                                  (tiempo_final.tv_usec - tiempo_inicio.tv_usec)/1e6;
 
-    // Dividir las filas de la matriz resultado entre los procesos
-    int rows_per_process = N / world_size;
-    int start_row = rank * rows_per_process;
-    int end_row;
-    
-    // El último proceso toma las filas restantes
-    if (rank == world_size - 1) {
-        end_row = N;
-    } else {
-        end_row = start_row + rows_per_process;
-    }
-    
-    int local_rows = end_row - start_row;
-
-    // Cada proceso calcula su bloque de filas de la matriz resultado
-    vector<vector<float>> local_C = multiply_rows(A, B, start_row, end_row, N);
-
-    // Preparar el resultado completo en el proceso 0
-    if (rank == 0) {
-        C.resize(N, vector<float>(N));
-    }
-
-    // MPI_Gather: recolectar todos los bloques de filas en el proceso 0
-    // Necesitamos usar una estructura más simple para MPI_Gather
-    // Convertir la matriz local a un vector unidimensional
-    vector<float> local_flat(local_rows * N);
-    for (int i = 0; i < local_rows; ++i) {
-        for (int j = 0; j < N; ++j) {
-            local_flat[i * N + j] = local_C[i][j];
+        vector<string> mapeo_ip_por_rank(size);
+        for (int proceso = 0; proceso < size; ++proceso) {
+            mapeo_ip_por_rank[proceso] = string(&ips_todos_procesos[proceso * TAM_BUFFER_IP]);
         }
-    }
 
-    // Preparar los tamaños de recepción para MPI_Gatherv (ya que pueden ser diferentes)
-    vector<int> recvcounts(world_size);
-    vector<int> displs(world_size);
-    
-    if (rank == 0) {
-        for (int i = 0; i < world_size; ++i) {
-            int i_start = i * rows_per_process;
-            int i_end = (i == world_size - 1) ? N : i_start + rows_per_process;
-            recvcounts[i] = (i_end - i_start) * N;
-            displs[i] = i_start * N;
-        }
-    }
-
-    // Vector para recibir todos los datos en el proceso 0
-    vector<float> C_flat;
-    if (rank == 0) {
-        C_flat.resize(N * N);
-    }
-
-    // MPI_Gatherv: recolectar datos de tamaños variables en el proceso 0
-    MPI_Gatherv(&local_flat[0], local_rows * N, MPI_FLOAT,
-                &C_flat[0], &recvcounts[0], &displs[0], MPI_FLOAT,
-                0, MPI_COMM_WORLD);
-
-    // Solo el proceso 0 muestra los resultados
-    if (rank == 0) {
-        tiempo_fin = MPI_Wtime();
+        cout << "\n=== Resultados ===" << endl;
+        cout << fixed << setprecision(2);
         
-        // Convertir el vector plano de vuelta a matriz
-        for (int i = 0; i < N; ++i) {
-            for (int j = 0; j < N; ++j) {
-                C[i][j] = C_flat[i * N + j];
-            }
+        cout << "\nDistribución de trabajo:" << endl;
+        for (int proceso = 0; proceso < size; ++proceso) {
+            cout << "Proceso " << proceso << " (IP: " << mapeo_ip_por_rank[proceso] << ")" << endl;
+            cout << "  - Elementos procesados: " << elementos_por_proceso[proceso] << endl;
+            cout << "  - Producto parcial: " << scientific << productos_parciales[proceso] << endl;
         }
 
-        // Mostrar elementos específicos
-        cout << "\n[MPI con " << world_size << " procesos]" << endl;
-        cout << "Primer elemento C[0][0]: " << C[0][0] << endl;
-        cout << "Elemento superior derecho C[0][" << N-1 << "]: " << C[0][N-1] << endl;
-        cout << "Elemento inferior izquierdo C[" << N-1 << "][0]: " << C[N-1][0] << endl;
-        cout << "Ultimo elemento C[" << N-1 << "][" << N-1 << "]: " << C[N-1][N-1] << endl;
+        cout << "\n=== Producto Escalar Final ===" << endl;
+        cout << scientific << setprecision(10);
+        cout << "A · B = " << resultado_total << endl;
+        
+        double valor_esperado = (double)dimension_vectores * (dimension_vectores + 1.0) * (dimension_vectores + 2.0) / 6.0;
+        cout << "Valor esperado: " << valor_esperado << endl;
+        double porcentaje_error = abs(resultado_total - valor_esperado) / valor_esperado * 100.0;
+        cout << fixed << setprecision(6);
+        cout << "Error relativo: " << porcentaje_error << "%" << endl;
 
-        double tiempo_mpi = tiempo_fin - tiempo_inicio;
-        cout << "\nTiempo de ejecución MPI: " << tiempo_mpi << " segundos\n";
+        cout << "\n=== Tiempo de Ejecución ===" << endl;
+        cout << "Tiempo total (MPI): " << tiempo_ejecucion << " segundos" << endl;
+        
+        double tiempo_secuencial_estimado = tiempo_ejecucion * size;
+        cout << "Speedup estimado: " << (tiempo_secuencial_estimado / tiempo_ejecucion) << "x" << endl;
     }
 
-    // Finalización de MPI
     MPI_Finalize();
-    
     return 0;
 }
+
+// Compilar: mpicxx -O3 -march=native -o ej3.out ej3.cpp
+// Ejecutar local: mpirun -n 4 ./ej3.out
+// Ejecutar en cluster: mpirun -n 8 --hostfile machinesfile.txt ./ej3.out

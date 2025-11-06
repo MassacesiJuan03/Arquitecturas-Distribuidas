@@ -1,138 +1,83 @@
-#include <iostream>
-#include <stdio.h>
-#include <stdlib.h>
-#include <mpi.h>      // Biblioteca MPI para programación paralela distribuida
-#include <vector>
-#include <cmath>
-#include <chrono>
+#include <mpi.h>
+#include <bits/stdc++.h>
 #include <sys/time.h>
-
 using namespace std;
-using namespace std::chrono;
 
-long long N = 10000000;
-
-// Versión secuencial del cálculo de logaritmo mediante serie de Taylor
-double log_taylor_whithout_threads(double x)
-{
-    double r = (x - 1) / (x + 1);
-    double sum = 0.0;
-    double pot = r; // r^n, comenzamos en n=0
-    for (long long n = 0; n < N; n++)
-    {
-        sum += pot / (2 * n + 1);
-        pot *= r * r; // r^(2n+2) para el siguiente término
-    }
-
-    return 2 * sum; // ln(x) = 2 * sum
+static long double calcular_serie_parcial(long double valor_y, long double valor_y_cuadrado,
+                                          long long inicio, long long fin) {
+    if (inicio >= fin) return 0.0L;
     
+    long double potencia = valor_y * powl(valor_y_cuadrado, (long double)inicio);
+    long double acumulador = 0.0L;
+    
+    for (long long indice = inicio; indice < fin; indice++) {
+        long long denominador = 2LL * indice + 1LL;
+        acumulador += potencia / (long double)denominador;
+        potencia *= valor_y_cuadrado;
+    }
+    return acumulador;
 }
 
-// Función que calcula una porción de la serie de Taylor para MPI
-// Cada proceso MPI ejecutará esta función con su rango específico [ini, fin]
-double log_taylor_mpi(double x, long long ini, long long fin)
-{
-    double r = (x - 1) / (x + 1);
-    double sum = 0.0;
-    double pot = pow(r, ini); // Comenzamos en r^ini para este rango
+int main(int argc, char** argv) {
+    MPI_Init(&argc, &argv);  // 
 
-    for (long long n = ini; n <= fin; n++)
-    {
-        sum += pot / (2 * n + 1);
-        pot *= r * r; // r^(2n+2) para el siguiente término
-    }
-    return 2 * sum; // Resultado parcial de este proceso
-}
-
-int main(int argc, char** argv)
-{
-    // Inicialización de MPI - OBLIGATORIO al inicio del programa
-    MPI_Init(&argc, &argv);
-    
-    // Obtener el número total de procesos MPI
-    int world_size;
-    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
-    
-    // Obtener el identificador (rank) de este proceso
-    int rank;
+    int rank = 0, size = 1;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    long double valor_x = 1500000.0L; 
+    long long cantidad_terminos = 10000000LL;
     
-    long double x = 1600000; // Valor de x para calcular ln(x)
-    long double resultado_mpi = 0.0;
-    double tiempo_inicio, tiempo_fin;
-    
-    // Debug: verificar que MPI se inicializó correctamente
     if (rank == 0) {
-        cout << "\n=== Configuración MPI ===" << endl;
-        cout << "Número de procesos detectados: " << world_size << endl;
-        cout << "========================\n" << endl;
+        cerr << "Ingrese x (>=1500000) [Enter para usar 1500000]: ";
+        long double entrada_x;
+        if (cin >> entrada_x) valor_x = entrada_x;
+        cin.clear(); 
+        cin.ignore(numeric_limits<streamsize>::max(), '\n');
     }
 
-    // Solo el proceso 0 (maestro) ejecuta la versión secuencial para comparar
-    if (rank == 0) {
-        cout << fixed;
-        cout.precision(10);
-        
-        // ---------------------- SECUENCIAL ----------------------
-        auto t1 = high_resolution_clock::now();
-        
-        long double resultado_secuencial = log_taylor_whithout_threads(x);
-        
-        auto t2 = high_resolution_clock::now();
-        auto duracion_seq = duration_cast<milliseconds>(t2 - t1).count();
-        
-        cout << "\n[SECUENCIAL] ln(" << x << ") ≈ " << resultado_secuencial << endl;
-        cout << "Tiempo secuencial: " << duracion_seq << " ms" << endl;
-        cout << "----------------------------------------\n" << endl;
+    MPI_Bcast(&valor_x, 1, MPI_LONG_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&cantidad_terminos, 1, MPI_LONG_LONG, 0, MPI_COMM_WORLD);
+
+    if (valor_x < 1500000.0L) {
+        if (rank == 0) {
+            cerr << "x debe ser >= 1500000 (segun el TP)." << endl;
+        }
+        MPI_Finalize();
+        return 1;
     }
 
-    // Sincronizar todos los procesos antes de comenzar la versión paralela
+    long double var_y  = (valor_x - 1.0L) / (valor_x + 1.0L);
+    long double var_y_cuadrado = var_y * var_y;
+
+    long long terminos_base = cantidad_terminos / size;
+    long long resto  = cantidad_terminos % size;
+    long long indice_inicial = rank * terminos_base + min<long long>(rank, resto);
+    long long cantidad_a_tomar = terminos_base + (rank < resto ? 1 : 0);
+    long long indice_final = indice_inicial + cantidad_a_tomar;
+
     MPI_Barrier(MPI_COMM_WORLD);
-    
-    // ---------------------- PARALELO CON MPI ----------------------
-    // El proceso 0 toma el tiempo de inicio
+    timeval tiempo_inicio{}, tiempo_fin{};
+    if (rank == 0) gettimeofday(&tiempo_inicio, nullptr);
+
+    long double resultado_parcial = calcular_serie_parcial(var_y, var_y_cuadrado, indice_inicial, indice_final);
+
+    long double total_global = 0.0L;
+    MPI_Reduce(&resultado_parcial, &total_global, 1, MPI_LONG_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+
     if (rank == 0) {
-        tiempo_inicio = MPI_Wtime(); // Función MPI para medir tiempo con alta precisión
-    }
-    
-    // Calcular el tamaño del bloque que procesará cada proceso
-    long long bloque = N / world_size;
-    long long inicio = rank * bloque;
-    long long fin;
-    
-    // El último proceso toma todos los elementos restantes
-    if (rank == world_size - 1) {
-        fin = N - 1;
-    } else {
-        fin = (rank + 1) * bloque - 1;
-    }
-    
-    // Cada proceso calcula su parte de la serie de Taylor
-    double resultado_local = log_taylor_mpi(x, inicio, fin);
-    
-    // MPI_Reduce: combina los resultados parciales de todos los procesos
-    // - resultado_local: valor que envía cada proceso
-    // - resultado_mpi_temp: donde se almacena la suma total (solo en proceso 0)
-    // - 1: número de elementos a reducir
-    // - MPI_DOUBLE: tipo de dato
-    // - MPI_SUM: operación de reducción (suma)
-    // - 0: proceso destino (rank 0)
-    // - MPI_COMM_WORLD: comunicador
-    double resultado_mpi_temp = 0.0;
-    MPI_Reduce(&resultado_local, &resultado_mpi_temp, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
-    resultado_mpi = resultado_mpi_temp;
-    
-    // Solo el proceso 0 muestra los resultados finales
-    if (rank == 0) {
-        tiempo_fin = MPI_Wtime();
-        double tiempo_mpi = (tiempo_fin - tiempo_inicio) * 1000.0; // Convertir a milisegundos
-        
-        cout << "[MPI con " << world_size << " procesos] ln(" << x << ") ≈ " << resultado_mpi << endl;
-        cout << "Tiempo MPI: " << tiempo_mpi << " ms" << endl;
+        gettimeofday(&tiempo_fin, nullptr);
+        double duracion = (tiempo_fin.tv_sec - tiempo_inicio.tv_sec) + (tiempo_fin.tv_usec - tiempo_inicio.tv_usec)/1e6;
+
+        long double logaritmo_natural = 2.0L * total_global;
+        cout << setprecision(15) << fixed;
+        cout << "ln(x) = " << logaritmo_natural << "\n";
+        cout << "Tiempo (s) = " << duracion << "\n";
     }
 
-    // Finalización de MPI - OBLIGATORIO al final del programa
     MPI_Finalize();
-    
     return 0;
 }
+// mpicxx -O3 -march=native -o ej1.out ej1.cpp 
+// mpirun -n 8 ./ej1.out
+// mpirun -n 32 --hostfile machinesfile.txt ./ej1.out
